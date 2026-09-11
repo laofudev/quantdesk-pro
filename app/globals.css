@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 深色金融终端风格：slate-900 底 + 琥珀 #D4B06B 点缀（不使用蓝紫渐变） */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-slate-900 text-slate-200 antialiased;
+}
+
+/* 细滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}

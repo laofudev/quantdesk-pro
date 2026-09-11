@@ -1,0 +1,27 @@
+{
+  "name": "quantdesk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A股竞价短线选股工作台（本地工具，仅供学习研究）",
+  "scripts": {
+    "dev": "node node_modules/next/dist/bin/next dev",
+    "build": "node node_modules/next/dist/bin/next build",
+    "start": "node node_modules/next/dist/bin/next start",
+    "test:engine": "node node_modules/tsx/dist/cli.mjs --test tests/engine.test.ts tests/fuyao.test.ts"
+  },
+  "dependencies": {
+    "next": "14.2.15",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.10",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "autoprefixer": "10.4.19",
+    "postcss": "8.4.39",
+    "tailwindcss": "3.4.6",
+    "tsx": "4.16.2",
+    "typescript": "5.5.3"
+  }
+}
