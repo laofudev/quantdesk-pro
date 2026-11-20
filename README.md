@@ -93,8 +93,7 @@ quantdesk/
 │   ├── journal.ts                                   # 选股日志与胜负结算
 │   ├── format.ts / time.ts / types.ts               # 工具与类型
 │   └── engine/                                      # 纯函数选股引擎
-├── tests/                                           # 引擎 + 扶摇 envelope 单测
-└── AlphaX平台策略运行机制研究.md                    # 策略参考文档
+└── tests/                                           # 引擎 + 扶摇 envelope 单测
 ```
 
 ## 六、环境变量（可选）
