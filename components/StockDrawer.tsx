@@ -1,47 +1,36 @@
 "use client";
 
-/** 个股明细抽屉：K线简图 + 资金流向 + 板块归属 + 公告 */
+/**
+ * 个股明细抽屉
+ *
+ * 内容：日 K 线（含 MA5/MA20）· 财务指标 · 行业与概念 · 异动/公告
+ * 数据全部来自扶摇，缺字段以 "—" 呈现，绝不白屏。
+ */
 
 import { useEffect, useMemo, useState } from "react";
-import type { Announcement, FinanceMetrics, KlineBar, MoneyFlow, SectorInfo } from "@/lib/types";
+import { CandleChart } from "@/components/charts";
+import { fmtPct, pctColor } from "@/lib/format";
+import type { Announcement, FinanceMetrics, KlineBar, SectorInfo } from "@/lib/types";
 
 interface StockDetail {
   code: string;
   kline: KlineBar[] | null;
-  moneyFlow: MoneyFlow[] | null;
   finance: FinanceMetrics | null;
   sector: SectorInfo | null;
   announcements: Announcement[] | null;
+  anomaly?: { tags: string[]; tagName?: string; reason?: string } | null;
   degraded: boolean;
   message?: string;
 }
 
-/** 纯 SVG 迷你 K 线图（最近 60 根） */
-function MiniKline({ bars }: { bars: KlineBar[] }) {
-  const data = bars.slice(-60);
-  if (data.length === 0) return <div className="text-xs text-slate-500">无 K 线数据</div>;
-  const W = 520, H = 160, PAD = 4;
-  const hi = Math.max(...data.map((b) => b.high));
-  const lo = Math.min(...data.map((b) => b.low));
-  const range = hi - lo || 1;
-  const bw = (W - PAD * 2) / data.length;
-  const y = (p: number) => PAD + (1 - (p - lo) / range) * (H - PAD * 2);
+function Metric({ label, value, accent }: { label: string; value: string; accent?: string }) {
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
-      {data.map((b, i) => {
-        const up = b.close >= b.open;
-        const color = up ? "#f87171" : "#34d399";
-        const x = PAD + i * bw;
-        const bodyTop = y(Math.max(b.open, b.close));
-        const bodyH = Math.max(1, Math.abs(y(b.open) - y(b.close)));
-        return (
-          <g key={b.date}>
-            <line x1={x + bw / 2} x2={x + bw / 2} y1={y(b.high)} y2={y(b.low)} stroke={color} strokeWidth={1} />
-            <rect x={x + 0.5} y={bodyTop} width={Math.max(1, bw - 1)} height={bodyH} fill={up ? "none" : color} stroke={color} strokeWidth={1} />
-          </g>
-        );
-      })}
-    </svg>
+    <div className="rounded-[9px] border border-[var(--hairline)] bg-black/20 px-3 py-2">
+      <div className="text-[10px] text-[var(--ink-faint)]">{label}</div>
+      <div className="tnum mt-0.5 font-mono text-[13px]" style={{ color: accent ?? "var(--ink-soft)" }}>
+        {value}
+      </div>
+    </div>
   );
 }
 
@@ -51,7 +40,11 @@ export default function StockDrawer({ code, onClose }: { code: string | null; on
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!code) { setDetail(null); setError(null); return; }
+    if (!code) {
+      setDetail(null);
+      setError(null);
+      return;
+    }
     const ctrl = new AbortController();
     setLoading(true);
     setDetail(null);
@@ -71,111 +64,218 @@ export default function StockDrawer({ code, onClose }: { code: string | null; on
     return () => ctrl.abort();
   }, [code]);
 
-  const flowSum = useMemo(
-    () => (detail?.moneyFlow ?? []).slice(-5).reduce((s, f) => s + f.netMain, 0),
-    [detail]
-  );
+  useEffect(() => {
+    if (!code) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [code, onClose]);
+
+  const klineStats = useMemo(() => {
+    const bars = detail?.kline ?? [];
+    if (bars.length < 2) return null;
+    const last = bars[bars.length - 1];
+    const prev = bars[bars.length - 2];
+    const chg = prev.close > 0 ? ((last.close / prev.close - 1) * 100) : 0;
+    const first = bars[0];
+    const period = first.close > 0 ? ((last.close / first.close - 1) * 100) : 0;
+    return { chg, period, count: bars.length };
+  }, [detail]);
 
   if (!code) return null;
+
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/50" onClick={onClose}>
-      <div
-        className="h-full w-full max-w-xl overflow-y-auto border-l border-slate-700 bg-slate-900 p-5 shadow-2xl"
+    <div className="fixed inset-0 z-50 flex justify-end" onClick={onClose}>
+      <div className="absolute inset-0 animate-fade-in bg-black/60 backdrop-blur-sm" />
+
+      <aside
+        className="relative z-10 h-full w-full max-w-2xl animate-fade-up overflow-y-auto border-l border-[var(--hairline)] bg-[rgba(8,10,15,0.97)] shadow-[0_0_80px_-20px_rgba(0,0,0,0.9)]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="font-mono text-lg font-semibold text-amber-accent">{code}</h2>
-          <button onClick={onClose} className="rounded bg-slate-700/70 px-3 py-1 text-sm text-slate-300 hover:bg-slate-700">关闭</button>
+        {/* 头部 */}
+        <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-[var(--hairline)] bg-[rgba(8,10,15,0.92)] px-5 py-3.5 backdrop-blur-xl">
+          <div className="min-w-0">
+            <div className="flex items-baseline gap-2">
+              <span className="tnum font-mono text-[15px] font-semibold text-[#e8c887]">{code}</span>
+              {detail?.sector?.industry && (
+                <span className="chip chip-gold">{detail.sector.industry}</span>
+              )}
+            </div>
+            {klineStats && (
+              <div className="mt-0.5 text-[11px] text-[var(--ink-mute)]">
+                收盘 {detail?.kline?.[detail.kline.length - 1]?.close.toFixed(2)} ·
+                <span style={{ color: pctColor(klineStats.chg) }}> {fmtPct(klineStats.chg)} </span>·
+                区间 {fmtPct(klineStats.period)} / {klineStats.count} 日
+              </div>
+            )}
+          </div>
+          <div className="flex-1" />
+          <button onClick={onClose} className="btn h-8 px-3 py-0 text-[12px]" aria-label="关闭">
+            <span className="text-[13px]">✕</span>
+          </button>
         </div>
 
-        {loading && <div className="py-10 text-center text-sm text-slate-400">加载中…</div>}
+        <div className="space-y-6 px-5 py-5">
+          {loading && (
+            <div className="space-y-3">
+              <div className="skeleton h-[190px] rounded-[10px]" />
+              <div className="skeleton h-24 rounded-[10px]" />
+              <div className="skeleton h-24 rounded-[10px]" />
+            </div>
+          )}
 
-        {!loading && error && (
-          <div className="rounded border border-red-500/50 bg-red-500/10 px-3 py-2 text-xs text-red-300">
-            加载失败:{error}
-          </div>
-        )}
+          {!loading && error && (
+            <div className="rounded-[9px] border border-[rgba(246,70,93,0.32)] bg-[rgba(246,70,93,0.1)] px-3.5 py-2.5 text-[12px] text-[#ff8a99]">
+              加载失败：{error}
+            </div>
+          )}
 
-        {!loading && !error && !detail && (
-          <div className="py-10 text-center text-xs text-slate-500">暂无数据</div>
-        )}
+          {!loading && !error && !detail && (
+            <div className="py-10 text-center text-[12px] text-[var(--ink-mute)]">暂无数据</div>
+          )}
 
-        {!loading && !error && detail && (
-          <div className="space-y-5">
-            {detail.message && <div className="rounded border border-amber-accent/40 bg-amber-accent/10 px-3 py-2 text-xs text-amber-accent">{detail.message}</div>}
+          {!loading && !error && detail && (
+            <>
+              {detail.message && (
+                <div className="rounded-[9px] border border-[rgba(240,163,94,0.3)] bg-[rgba(240,163,94,0.08)] px-3.5 py-2.5 text-[11.5px] text-[#f0a35e]">
+                  {detail.message}
+                </div>
+              )}
 
-            <section>
-              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">日 K 线（近 60 日）</h3>
-              <div className="rounded border border-slate-700 bg-slate-800/50 p-2">
-                {detail.kline ? <MiniKline bars={detail.kline} /> : <div className="p-3 text-xs text-slate-500">K线数据不可用</div>}
-              </div>
-            </section>
-
-            <section>
-              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">近 5 日主力净流入</h3>
-              {detail.moneyFlow && detail.moneyFlow.length > 0 ? (
-                <>
-                  <div className={`mb-1 font-mono text-sm ${flowSum >= 0 ? "text-red-400" : "text-emerald-400"}`}>
-                    合计 {flowSum >= 0 ? "+" : ""}{(flowSum / 1e4).toFixed(0)} 万元
+              {/* K 线 */}
+              <section>
+                <div className="mb-2 flex items-baseline justify-between">
+                  <h3 className="text-[11px] uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+                    日 K 线 · MA5 / MA20
+                  </h3>
+                  <div className="flex items-center gap-3 text-[10px] text-[var(--ink-faint)]">
+                    <span className="flex items-center gap-1">
+                      <span className="h-[2px] w-3" style={{ background: "#d4b06b" }} />MA5
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="h-[2px] w-3" style={{ background: "#4fd1c5" }} />MA20
+                    </span>
                   </div>
-                  <div className="space-y-1">
-                    {detail.moneyFlow.slice(-5).map((f) => (
-                      <div key={f.date} className="flex justify-between font-mono text-xs">
-                        <span className="text-slate-500">{f.date}</span>
-                        <span className={f.netMain >= 0 ? "text-red-400" : "text-emerald-400"}>
-                          {f.netMain >= 0 ? "+" : ""}{(f.netMain / 1e4).toFixed(0)}万
+                </div>
+                <div className="rounded-[12px] border border-[var(--hairline)] bg-black/25 p-3">
+                  {detail.kline && detail.kline.length > 0 ? (
+                    <CandleChart bars={detail.kline} height={210} />
+                  ) : (
+                    <div className="py-10 text-center text-[11.5px] text-[var(--ink-mute)]">
+                      K 线数据不可用
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              {/* 财务 */}
+              <section>
+                <h3 className="mb-2 text-[11px] uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+                  财务指标 · 近一期报告期
+                </h3>
+                {detail.finance ? (
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                    <Metric
+                      label="ROE"
+                      value={detail.finance.roe !== undefined ? `${detail.finance.roe.toFixed(1)}%` : "—"}
+                    />
+                    <Metric
+                      label="归母净利同比"
+                      value={
+                        detail.finance.yoyProfit !== undefined ? `${fmtPct(detail.finance.yoyProfit, 1)}` : "—"
+                      }
+                      accent={
+                        detail.finance.yoyProfit !== undefined
+                          ? pctColor(detail.finance.yoyProfit)
+                          : undefined
+                      }
+                    />
+                    <Metric
+                      label="营收同比"
+                      value={
+                        detail.finance.yoyRevenue !== undefined ? `${fmtPct(detail.finance.yoyRevenue, 1)}` : "—"
+                      }
+                      accent={
+                        detail.finance.yoyRevenue !== undefined
+                          ? pctColor(detail.finance.yoyRevenue)
+                          : undefined
+                      }
+                    />
+                    <Metric
+                      label="净利率"
+                      value={detail.finance.netMargin !== undefined ? `${detail.finance.netMargin.toFixed(1)}%` : "—"}
+                    />
+                    <Metric
+                      label="资产负债率"
+                      value={
+                        detail.finance.debtRatio !== undefined ? `${detail.finance.debtRatio.toFixed(1)}%` : "—"
+                      }
+                    />
+                  </div>
+                ) : (
+                  <div className="rounded-[9px] border border-[var(--hairline)] bg-black/20 px-3.5 py-3 text-[11.5px] text-[var(--ink-mute)]">
+                    财务指标不可用
+                  </div>
+                )}
+              </section>
+
+              {/* 行业与概念 */}
+              <section>
+                <h3 className="mb-2 text-[11px] uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+                  行业与概念
+                </h3>
+                {detail.sector && (detail.sector.industry || detail.sector.concepts.length > 0) ? (
+                  <div className="flex flex-wrap gap-1.5">
+                    {detail.sector.industry && (
+                      <span className="chip chip-gold">{detail.sector.industry}</span>
+                    )}
+                    {detail.sector.concepts.slice(0, 16).map((c) => (
+                      <span key={c} className="chip">
+                        {c}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-[11.5px] text-[var(--ink-mute)]">板块数据不可用</div>
+                )}
+              </section>
+
+              {/* 异动 / 公告 */}
+              <section>
+                <h3 className="mb-2 text-[11px] uppercase tracking-[0.14em] text-[var(--ink-faint)]">
+                  异动与公告
+                </h3>
+                {detail.announcements && detail.announcements.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {detail.announcements.slice(0, 10).map((a, i) => (
+                      <div
+                        key={i}
+                        className="rounded-[9px] border border-[var(--hairline)] bg-black/20 px-3.5 py-2.5 text-[12px] leading-relaxed text-[var(--ink-soft)]"
+                      >
+                        <span className="tnum mr-2 font-mono text-[10.5px] text-[var(--ink-faint)]">
+                          {a.time?.slice(0, 10) ?? ""}
                         </span>
+                        {a.title}
                       </div>
                     ))}
                   </div>
-                </>
-              ) : <div className="text-xs text-slate-500">资金流数据不可用</div>}
-            </section>
-
-            <section>
-              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">板块归属</h3>
-              {detail.sector ? (
-                <div className="flex flex-wrap gap-1.5 text-xs">
-                  {detail.sector.industry && (
-                    <span className="rounded bg-amber-accent/20 px-2 py-0.5 text-amber-accent">{detail.sector.industry}</span>
-                  )}
-                  {detail.sector.concepts?.slice(0, 12).map((c) => (
-                    <span key={c} className="rounded bg-slate-700/60 px-2 py-0.5 text-slate-300">{c}</span>
-                  ))}
-                  {!detail.sector.industry && (detail.sector.concepts?.length ?? 0) === 0 && <span className="text-slate-500">无板块数据</span>}
-                </div>
-              ) : <div className="text-xs text-slate-500">板块数据不可用</div>}
-            </section>
-
-            {detail.finance && (
-              <section>
-                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">财务指标（近一期）</h3>
-                <div className="grid grid-cols-2 gap-2 font-mono text-xs text-slate-300">
-                  <div>ROE：{detail.finance.roe?.toFixed(1) ?? "-"}%</div>
-                  <div>净利同比：{detail.finance.yoyProfit?.toFixed(1) ?? "-"}%</div>
-                  <div>营收同比：{detail.finance.yoyRevenue?.toFixed(1) ?? "-"}%</div>
-                  <div>净利率：{detail.finance.netMargin?.toFixed(1) ?? "-"}%</div>
-                  <div>资产负债率：{detail.finance.debtRatio?.toFixed(1) ?? "-"}%</div>
-                </div>
+                ) : (
+                  <div className="text-[11.5px] text-[var(--ink-mute)]">
+                    近 10 日无异动公告或数据不可用
+                  </div>
+                )}
               </section>
-            )}
 
-            <section>
-              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">近期公告</h3>
-              {detail.announcements && detail.announcements.length > 0 ? (
-                <div className="space-y-1">
-                  {detail.announcements.slice(0, 10).map((a, i) => (
-                    <div key={i} className="text-xs">
-                      <span className="mr-2 font-mono text-slate-500">{a.time?.slice(0, 10) ?? ""}</span>
-                      <span className="text-slate-300">{a.title}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : <div className="text-xs text-slate-500">近 10 日无公告或数据不可用</div>}
-            </section>
-          </div>
-        )}
-      </div>
+              <p className="pt-2 text-[10.5px] leading-relaxed text-[var(--ink-faint)]">
+                数据来源：扶摇 Fuyao（同花顺）。本页所有内容仅为客观行情与财务数据展示，
+                不构成任何投资建议、荐股或交易指令。
+              </p>
+            </>
+          )}
+        </div>
+      </aside>
     </div>
   );
 }

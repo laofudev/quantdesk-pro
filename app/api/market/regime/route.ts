@@ -1,51 +1,46 @@
 /**
  * GET /api/market/regime — 当日市场环境判定（Phase 0）
- * 返回 TM、regime、权重、涨跌停统计、情绪周期摘要。
- * 扶摇不可达时优雅降级到 Tushare 快照/中性值，绝不 500。
- * 情绪周期：由扶摇涨跌停池+连板天梯+热股榜当日衍生，并逐日累积近 40 日序列（缓存）。
+ * 纯扶摇数据源；任何失败都优雅降级，绝不 500。
  */
 import { NextResponse } from "next/server";
-import { judgeRegime, resolvePresetWeights } from "@/lib/engine/regime";
+import { judgeRegime } from "@/lib/engine/regime";
 import {
-  getFuyaoHotList,
-  getFuyaoLadder,
-  getFuyaoLimitBreakTotal,
-  getFuyaoLimitDownTotal,
-  getFuyaoLimitUpPool,
+  getHotList,
+  getLadder,
+  getLimitBreakTotal,
+  getLimitDownTotal,
+  getLimitUpPool,
+  getLimitUpStats,
 } from "@/lib/providers/fuyao";
 import { cached, cacheGet, cacheSet, endOfDayTTL } from "@/lib/cache";
-import { loadSnapshot } from "@/lib/snapshot";
+import { loadMarket, loadSectorPerformance } from "@/lib/data/market";
+import { requireFuyaoCtx } from "@/lib/api-guard";
+import type { EmotionPoint } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-interface EmotionPoint {
-  date: string;        // yyyy-MM-dd
-  ztjs?: number;       // 涨停家数
-  dtjs?: number;       // 跌停家数
-  szbl?: number;       // 上涨比例 0~1
-  dbcgl?: number;      // 打板成功率 0~1
-  lbjs?: number;       // 最高连板高度
-  lbgs?: number;       // 连板只数
-  hot?: string[];      // 人气榜 Top5
+/** 当日涨停池（10 分钟缓存） */
+function getUpPoolCached(ctx: { apiKey: string }) {
+  return cached("limit_up_pool_regime_10m", 10 * 60 * 1000, () => getLimitUpPool(ctx));
 }
 
-/** 当日涨停池（10 分钟缓存，供情绪衍生与涨跌停计数复用；独立 key 避免与流水线的当日 TTL 缓存互相覆盖） */
-function getUpPoolCached() {
-  return cached("limit_up_pool_regime_10m", 10 * 60 * 1000, () => getFuyaoLimitUpPool());
-}
-
-/** 由扶摇涨跌停池/炸板池/连板天梯/热股榜衍生当日情绪指标，并维护近 40 日序列 */
-async function deriveEmotion(upCount: number, downCount: number): Promise<EmotionPoint | null> {
+/** 由涨跌停池 + 天梯 + 热榜衍生情绪指标，并维护近 40 日序列 */
+async function deriveEmotion(
+  ctx: { apiKey: string },
+  upCount: number,
+  downCount: number
+): Promise<EmotionPoint | null> {
   return cached("emotion_today", endOfDayTTL(), async () => {
-    const [upPool, dtTotal, breakTotal, ladder, hot] = await Promise.all([
-      getUpPoolCached(),
-      getFuyaoLimitDownTotal(),
-      getFuyaoLimitBreakTotal(),
-      getFuyaoLadder(),
-      getFuyaoHotList(),
+    const [upPool, dtTotal, breakTotal, ladder, hot, stats] = await Promise.all([
+      getUpPoolCached(ctx),
+      getLimitDownTotal(ctx),
+      getLimitBreakTotal(ctx),
+      getLadder(ctx),
+      getHotList(ctx),
+      getLimitUpStats(ctx),
     ]);
     if (upPool === null && dtTotal === null && ladder === null) return null;
-    const ztjs = upPool?.total;
+    const ztjs = upPool?.total ?? stats?.limitUpCount;
     const dbcgl =
       ztjs !== undefined && breakTotal !== null && breakTotal !== undefined && ztjs + breakTotal > 0
         ? ztjs / (ztjs + breakTotal)
@@ -60,7 +55,6 @@ async function deriveEmotion(upCount: number, downCount: number): Promise<Emotio
       lbgs: ladder?.boardCount,
       hot: hot?.slice(0, 5).map((h) => h.name ?? h.code),
     };
-    // 逐日累积近 40 日序列（90 天 TTL，覆盖窗口足够）
     try {
       const series = (await cacheGet<EmotionPoint[]>("emotion_series")) ?? [];
       const idx = series.findIndex((p) => p.date === point.date);
@@ -77,44 +71,49 @@ async function deriveEmotion(upCount: number, downCount: number): Promise<Emotio
 
 export async function GET(req: Request) {
   try {
+    const guard = await requireFuyaoCtx();
+    if (!guard.ok || !guard.ctx) {
+      return guard.response ?? NextResponse.json({ error: "未授权" }, { status: 401 });
+    }
+    const ctx = guard.ctx;
     const url = new URL(req.url);
-    // 隔夜外部指数均值 %（本地版手动输入，可省略）
     const overnightParam = url.searchParams.get("overnight");
-    const parsedOvernight = overnightParam !== null && overnightParam !== "" ? parseFloat(overnightParam) : null;
-    const overnightIdxAvg = parsedOvernight !== null && Number.isFinite(parsedOvernight) ? parsedOvernight : null;
+    const parsed = overnightParam !== null && overnightParam !== "" ? parseFloat(overnightParam) : null;
+    const overnightIdxAvg = parsed !== null && Number.isFinite(parsed) ? parsed : null;
 
-    const snap = await loadSnapshot();
-    const quotes = snap.quotes;
-
-    // 开盘涨幅数组（扶摇快照 open_price vs prev_price）
+    const market = await loadMarket(ctx);
+    const quotes = market.quotes;
     const openPcts = quotes
       .filter((q) => q.preClose > 0 && q.open > 0)
       .map((q) => (q.open / q.preClose - 1) * 100);
-
-    // 个股涨跌比
     const up = quotes.filter((q) => q.pct > 0).length;
     const down = quotes.filter((q) => q.pct < 0).length;
     const stockAdvRatio = down > 0 ? up / down : up > 0 ? 1 : undefined;
 
-    // 涨跌停家数：优先扶摇涨跌停池 total，失败回退快照 ±9.8% 近似
-    const [upPoolTotal, limitDownPoolTotal] = await Promise.all([
-      getUpPoolCached().then((p) => p?.total ?? null),
-      cached("limit_down_total", 10 * 60 * 1000, () => getFuyaoLimitDownTotal()),
+    const [upPoolTotal, limitDownPoolTotal, sectorPctMap] = await Promise.all([
+      getUpPoolCached(ctx).then((p) => p?.total ?? null),
+      cached("limit_down_total", 10 * 60 * 1000, () => getLimitDownTotal(ctx)),
+      market.industryMap ? loadSectorPerformance(ctx, market.industryMap) : Promise.resolve(new Map<string, number>()),
     ]);
     const limitUpCount = upPoolTotal ?? quotes.filter((q) => q.pct >= 9.8).length;
     const limitDownCount = limitDownPoolTotal ?? quotes.filter((q) => q.pct <= -9.8).length;
 
-    const preset = await resolvePresetWeights();
+    let sectorUp = 0, sectorDown = 0;
+    sectorPctMap.forEach((v) => {
+      if (v > 0) sectorUp++;
+      else if (v < 0) sectorDown++;
+    });
+    const sectorAdvRatio = sectorDown > 0 ? sectorUp / sectorDown : sectorUp > 0 ? 1 : undefined;
+
     const regime = judgeRegime({
       openPcts,
       limitDownCount,
       stockAdvRatio,
+      sectorAdvRatio,
       overnightIdxAvg,
-      // 板块涨跌比需要板块级数据，本地版缺省不参与确认
-    }, preset);
+    });
 
-    // 情绪周期摘要（扶摇涨跌停池+天梯+热榜衍生，缓存当日，失败降级 null）
-    const emotion = await deriveEmotion(up, down);
+    const emotion = await deriveEmotion(ctx, up, down);
     const emotionSeries = (await cacheGet<EmotionPoint[]>("emotion_series")) ?? undefined;
 
     return NextResponse.json({
@@ -133,14 +132,13 @@ export async function GET(req: Request) {
       },
       emotion: emotion ?? null,
       emotionSeries: emotionSeries && emotionSeries.length > 1 ? emotionSeries : undefined,
-      source: snap.source,
-      degraded: snap.degraded,
-      weightsPreset: preset.from,
-      tradeDate: snap.tradeDate,
-      message: snap.message,
+      sectorCount: sectorPctMap.size,
+      source: market.source,
+      degraded: market.degraded,
+      tradeDate: market.tradeDate,
+      message: market.message,
     });
   } catch (err) {
-    // 兜底：中性 regime，绝不 500
     return NextResponse.json({
       tm: 0, regime: "均衡", label: "数据不可用（中性）", confirms: [],
       weights: { ethan: 0.2, lucas: 0.2, edwin: 0.2, sophia: 0.2, mia: 0.2 },

@@ -45,19 +45,45 @@ function scoreTrend(ctx: StockContext, mas: { ma5?: number; ma20?: number; ma60?
   return 30;
 }
 
-/** capital：近 5 日主力净流入分档：正且递增 → 85；正 → 70；平衡 → 55；流出 → 35 */
+/**
+ * capital（资金强度）：由「量能扩张 + 竞价抢筹分位 + 连板高度」合成。
+ * 纯扶摇口径（无逐笔资金流接口），三项缺失时落中性 50。
+ * 资金流口径的等价替代：量能扩张反映资金持续涌入，竞价抢筹反映早盘资金意图。
+ */
 function scoreCapital(ctx: StockContext): number {
-  const flow = ctx.moneyFlow;
-  if (!flow || flow.length === 0) return 50; // 缺失中性
-  const tail = flow.slice(-5);
-  const sum = tail.reduce((s, f) => s + f.netMain, 0);
-  const avgAbs = tail.reduce((s, f) => s + Math.abs(f.netMain), 0) / tail.length;
-  const increasing = tail.every((f, i) => i === 0 || f.netMain >= tail[i - 1].netMain);
-  if (avgAbs === 0) return 55; // 全零视为无资金往来，按平衡档而非流出档
-  if (sum > 0 && increasing && tail.length >= 3) return 85;
-  if (sum > 0) return 70;
-  if (avgAbs > 0 && Math.abs(sum) <= avgAbs * 0.5) return 55; // 进出基本平衡
-  return 35;
+  const cap = ctx.capital;
+  const signals: { value: number; weight: number }[] = [];
+
+  // 1) 量能扩张：近3日均额 / 前2日均额
+  const ve = cap?.volumeExpansion;
+  if (ve !== undefined && ve > 0) {
+    if (ve >= 1.6) signals.push({ value: 85, weight: 0.4 });
+    else if (ve >= 1.2) signals.push({ value: 70, weight: 0.4 });
+    else if (ve >= 0.9) signals.push({ value: 55, weight: 0.4 });
+    else signals.push({ value: 35, weight: 0.4 });
+  }
+
+  // 2) 竞价抢筹分位（越小越靠前）
+  const gp = cap?.grabRankPct;
+  if (gp !== undefined) {
+    if (gp <= 0.05) signals.push({ value: 90, weight: 0.35 });
+    else if (gp <= 0.2) signals.push({ value: 75, weight: 0.35 });
+    else if (gp <= 0.6) signals.push({ value: 55, weight: 0.35 });
+    else signals.push({ value: 40, weight: 0.35 });
+  }
+
+  // 3) 连板高度
+  const st = cap?.streak;
+  if (st !== undefined && st > 0) {
+    if (st >= 3) signals.push({ value: 80, weight: 0.25 });
+    else if (st === 2) signals.push({ value: 65, weight: 0.25 });
+    else signals.push({ value: 50, weight: 0.25 });
+  }
+
+  if (signals.length === 0) return 50; // 缺失中性
+  const totalWeight = signals.reduce((s, x) => s + x.weight, 0);
+  const score = signals.reduce((s, x) => s + x.value * x.weight, 0) / totalWeight;
+  return Math.round(score * 100) / 100;
 }
 
 /** quality：PE>0 且 <50 → 70；ROE>8% → +15；PB<5 → 70 基准；数据缺失 → 50 */
@@ -153,6 +179,30 @@ function techBonus(ctx: StockContext, mas: { ma5?: number; ma20?: number; ma60?:
 
 /* ---------------- 主入口 ---------------- */
 
+/** capital 各项明细（供 UI 展开显示） */
+function capitalDetails(ctx: StockContext): Record<string, number | string | string[]> {
+  const cap = ctx.capital;
+  const d: Record<string, number | string | string[]> = {};
+  if (cap?.volumeExpansion !== undefined) {
+    d.volume_expansion = Number(cap.volumeExpansion.toFixed(2));
+    d.volume_expansion_note =
+      cap.volumeExpansion >= 1.2 ? "量能扩张（资金持续流入）"
+      : cap.volumeExpansion >= 0.9 ? "量能持平"
+      : "量能萎缩";
+  }
+  if (cap?.grabRankPct !== undefined) {
+    d.grab_rank_pct = Number(cap.grabRankPct.toFixed(3));
+    d.grab_note =
+      cap.grabRankPct <= 0.05 ? "竞价抢筹全市场前5%"
+      : cap.grabRankPct <= 0.2 ? "竞价抢筹前20%"
+      : cap.grabRankPct <= 0.6 ? "竞价抢筹中位"
+      : "竞价抢筹靠后";
+  }
+  if (cap?.streak !== undefined && cap.streak > 0) d.streak = cap.streak;
+  if (!Object.keys(d).length) d.note = "资金信号缺失（中性 50）";
+  return d;
+}
+
 /** ethan = Σ(dim × weight) + tech_bonus，归一 0-100 */
 export function scoreEthan(ctx: StockContext): AgentScore & { ma: { ma5?: number; ma20?: number; ma60?: number } } {
   const kline = sortedKline(ctx.kline);
@@ -187,6 +237,7 @@ export function scoreEthan(ctx: StockContext): AgentScore & { ma: { ma5?: number
       trend: dims.trend, capital: dims.capital, quality: dims.quality,
       position: dims.position, momentum: dims.momentum, safety: dims.safety,
       tech_bonus: bonus, bonus_hits: hits,
+      ...capitalDetails(ctx),
     },
   };
 }

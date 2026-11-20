@@ -5,3 +5,7 @@ node_modules/
 data/
 *.log
 .DS_Store
+tsconfig.tsbuildinfo
+.playwright-mcp/
+.workbuddy/
+.wbapp_*

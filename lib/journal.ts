@@ -1,13 +1,14 @@
 /**
- * 选股日志与胜负结算：
+ * 选股日志与胜负结算（纯扶摇）
+ *
  * 每次流水线产出 TopN 后按交易日记录到 data/picks.json；
- * 结算用 Tushare 日线把每笔模拟为「T 日开盘买入 → T+1 收盘卖出」，
+ * 结算用扶摇日线把每笔模拟为「T 日开盘买入 → T+1 收盘卖出」，
  * 开盘涨幅 ≥9.5% 的票按规则"不追"剔除（买不进），-5% 止损单独标记。
  */
 import fs from "node:fs/promises";
 import path from "node:path";
 import { cached, endOfDayTTL } from "@/lib/cache";
-import { getDailyKline } from "@/lib/providers/tushare";
+import { getKline, type FuyaoCtx } from "@/lib/providers/fuyao";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const JOURNAL_FILE = path.join(DATA_DIR, "picks.json");
@@ -17,34 +18,34 @@ export interface PickItem {
   name?: string;
   industry?: string;
   finalScore: number;
-  openPct: number; // T 日开盘涨幅 %
+  openPct: number;
 }
 
 export interface PickResult {
   code: string;
-  buy: number;      // T 日开盘价
-  sell: number;     // T+1 收盘价
-  retPct: number;   // 收盘卖收益 %
-  low: number;      // T+1 最低价（止损判定）
-  stopHit: boolean; // 盘中触及 -5% 止损
-  nodata?: boolean; // 缺数据（停牌等），不计入统计
+  buy: number;
+  sell: number;
+  retPct: number;
+  low: number;
+  stopHit: boolean;
+  nodata?: boolean;
 }
 
 export interface PickRecord {
-  date: string; // T 日（交易日 yyyy-MM-dd）
+  date: string;
   stocks: PickItem[];
   results?: PickResult[];
   settled: boolean;
 }
 
 export interface StatsSummary {
-  trades: number;              // 已结算且可执行的笔数（剔除买不进/无数据）
+  trades: number;
   wins: number;
-  winRate: number | null;      // %
-  avgRet: number | null;       // 平均单笔收益 %（T+1 收盘卖）
-  cumRet: number | null;       // 等权日组合复利累计收益 %
-  avgRetWithStop: number | null; // 严格执行 -5% 止损的平均单笔收益 %
-  noBuyCount: number;          // 开盘涨停买不进的次数
+  winRate: number | null;
+  avgRet: number | null;
+  cumRet: number | null;
+  avgRetWithStop: number | null;
+  noBuyCount: number;
   nodataCount: number;
   settledDays: number;
   pendingDays: number;
@@ -82,15 +83,14 @@ export async function recordPicks(date: string, stocks: PickItem[]): Promise<voi
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /** 结算单日：逐票取日线，T 日开盘买入、T+1 收盘卖出；数据不齐则整单保持待结算 */
-async function settleRecord(rec: PickRecord): Promise<PickRecord> {
+async function settleRecord(ctx: FuyaoCtx, rec: PickRecord): Promise<PickRecord> {
   const results: PickResult[] = [];
   for (const s of rec.stocks) {
-    const bars = await cached(`settle_daily_${s.code}`, endOfDayTTL(), () => getDailyKline(s.code));
+    const bars = await cached(`settle_kline_${s.code}`, endOfDayTTL(), () => getKline(ctx, s.code));
     const i = bars?.findIndex((b) => b.date === rec.date) ?? -1;
-    if (!bars || i < 0) return rec; // T 日 K 线还不存在（数据未更新），下次再结
+    if (!bars || i < 0) return rec;
     const t0 = bars[i];
     const t1 = i + 1 < bars.length ? bars[i + 1] : null;
-    // T+1 K 线未出（T 日收盘后查看时必然如此）→ 保持待结算，防止提前定案成"无数据"
     if (!t1) return rec;
     results.push({
       code: s.code,
@@ -105,12 +105,12 @@ async function settleRecord(rec: PickRecord): Promise<PickRecord> {
 }
 
 /** 结算所有未结算记录（幂等，可反复调用） */
-export async function settlePending(): Promise<PickRecord[]> {
+export async function settlePending(ctx: FuyaoCtx): Promise<PickRecord[]> {
   const records = await readJournal();
   let dirty = false;
   for (let i = 0; i < records.length; i++) {
     if (records[i].settled) continue;
-    const next = await settleRecord(records[i]);
+    const next = await settleRecord(ctx, records[i]);
     if (next.settled) {
       records[i] = next;
       dirty = true;
@@ -124,12 +124,12 @@ export async function loadJournal(): Promise<PickRecord[]> {
   return readJournal();
 }
 
-const NO_BUY_THRESHOLD = 9.5; // 开盘涨幅 ≥9.5% 按规则不追（买不进）
+const NO_BUY_THRESHOLD = 9.5;
 
 export function summarize(records: PickRecord[]): StatsSummary {
   let trades = 0, wins = 0, sum = 0, sumStop = 0, noBuyCount = 0, nodataCount = 0;
   let settledDays = 0, pendingDays = 0;
-  let cum = 1; // 等权日组合复利
+  let cum = 1;
   for (const r of records) {
     if (!r.settled || !r.results) {
       pendingDays++;
@@ -144,7 +144,7 @@ export function summarize(records: PickRecord[]): StatsSummary {
       }
       const s = r.stocks.find((x) => x.code === res.code);
       if (s && s.openPct >= NO_BUY_THRESHOLD) {
-        noBuyCount++; // 涨停开，规则不追
+        noBuyCount++;
         continue;
       }
       trades++;

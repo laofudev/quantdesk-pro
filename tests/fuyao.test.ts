@@ -5,9 +5,11 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { fyGet, normalizeThscode, msToDate, getFuyaoKline } from "../lib/providers/fuyao";
+import { fyGet, normalizeThscode, msToDate, getKline } from "../lib/providers/fuyao";
 
 type FetchImpl = typeof fetch;
+
+const TEST_CTX = { apiKey: "test-key" };
 
 let originalFetch: FetchImpl;
 let calls: { url: string; headers: Record<string, string> }[];
@@ -24,7 +26,6 @@ function mockFetch(impl: (url: string) => Promise<{ status: number; body: unknow
 
 beforeEach(() => {
   originalFetch = globalThis.fetch;
-  process.env.FUYAO_API_KEY = "test-key";
 });
 
 afterEach(() => {
@@ -33,7 +34,7 @@ afterEach(() => {
 
 test("fyGet 解析 code=0 信封并携带 X-api-key 头", async () => {
   mockFetch(async () => ({ status: 200, body: { code: 0, message: "success", request_id: "r1", data: { total: 1, item: [{ thscode: "000001.SZ" }] } } }));
-  const data = await fyGet<{ total: number; item: { thscode: string }[] }>("/api/a-share/prices/snapshot", { limit: 1 });
+  const data = await fyGet<{ total: number; item: { thscode: string }[] }>(TEST_CTX, "/api/a-share/prices/snapshot", { limit: 1 });
   assert.equal(data?.total, 1);
   assert.equal(data?.item[0].thscode, "000001.SZ");
   assert.equal(calls.length, 1);
@@ -43,7 +44,7 @@ test("fyGet 解析 code=0 信封并携带 X-api-key 头", async () => {
 
 test("fyGet 业务码非 0（如 2001 未认证）返回 null 且不重试", async () => {
   mockFetch(async () => ({ status: 200, body: { code: 2001, message: "unauthorized", data: null } }));
-  const data = await fyGet("/api/a-share/prices/snapshot");
+  const data = await fyGet(TEST_CTX, "/api/a-share/prices/snapshot");
   assert.equal(data, null);
   assert.equal(calls.length, 1);
 });
@@ -55,14 +56,14 @@ test("fyGet 信封 code=429 退避重试后成功", async () => {
     if (n === 1) return { status: 200, body: { code: 429, message: "request limit exceeded", data: null } };
     return { status: 200, body: { code: 0, data: { total: 5, item: [] } } };
   });
-  const data = await fyGet<{ total: number }>("/api/a-share/special-data/limit-down-pool", { page: 1, size: 1 });
+  const data = await fyGet<{ total: number }>(TEST_CTX, "/api/a-share/special-data/limit-down-pool", { page: 1, size: 1 });
   assert.equal(data?.total, 5);
   assert.equal(calls.length, 2);
 });
 
 test("fyGet HTTP 429 持续限流：最多重试 2 次后返回 null", async () => {
   mockFetch(async () => ({ status: 429, body: { code: 429, message: "request limit exceeded", data: null } }));
-  const data = await fyGet("/api/a-share/prices/snapshot");
+  const data = await fyGet(TEST_CTX, "/api/a-share/prices/snapshot");
   assert.equal(data, null);
   assert.equal(calls.length, 3); // 首次 + 2 次退避重试
 });
@@ -74,7 +75,7 @@ test("fyGet 信封 code=4001 按限流退避重试", async () => {
     if (n <= 2) return { status: 200, body: { code: 4001, message: "rate limited", data: null } };
     return { status: 200, body: { code: 0, data: { item: [1, 2, 3] } } };
   });
-  const data = await fyGet<{ item: number[] }>("/api/a-share/special-data/hot-stock-list");
+  const data = await fyGet<{ item: number[] }>(TEST_CTX, "/api/a-share/special-data/hot-stock-list");
   assert.deepEqual(data?.item, [1, 2, 3]);
   assert.equal(calls.length, 3);
 });
@@ -83,14 +84,13 @@ test("fyGet 网络异常返回 null（不抛出）", async () => {
   globalThis.fetch = (async () => {
     throw new Error("ECONNREFUSED");
   }) as FetchImpl;
-  const data = await fyGet("/api/a-share/prices/snapshot");
+  const data = await fyGet(TEST_CTX, "/api/a-share/prices/snapshot");
   assert.equal(data, null);
 });
 
-test("fyGet 缺少 FUYAO_API_KEY 时直接返回 null 且不发请求", async () => {
-  delete process.env.FUYAO_API_KEY;
+test("fyGet 缺少 apiKey 时直接返回 null 且不发请求", async () => {
   mockFetch(async () => ({ status: 200, body: { code: 0, data: {} } }));
-  const data = await fyGet("/api/a-share/prices/snapshot");
+  const data = await fyGet({ apiKey: "" }, "/api/a-share/prices/snapshot");
   assert.equal(data, null);
   assert.equal(calls.length, 0);
 });
@@ -108,7 +108,7 @@ test("msToDate 按 Asia/Shanghai 转换毫秒时间戳", () => {
   assert.equal(msToDate(1786032000000), "2026-08-07");
 });
 
-test("getFuyaoKline 解析 date_ms/OHLC 并按日期升序", async () => {
+test("getKline 解析 date_ms/OHLC 并按日期升序", async () => {
   mockFetch(async () => ({
     status: 200,
     body: {
@@ -122,7 +122,7 @@ test("getFuyaoKline 解析 date_ms/OHLC 并按日期升序", async () => {
       },
     },
   }));
-  const bars = await getFuyaoKline("000001.SZ", 10);
+  const bars = await getKline(TEST_CTX, "000001.SZ", 10);
   assert.ok(bars);
   assert.equal(bars.length, 2);
   assert.equal(bars[0].date, "2026-08-07"); // 升序：较早日期在前
@@ -134,8 +134,8 @@ test("getFuyaoKline 解析 date_ms/OHLC 并按日期升序", async () => {
   assert.match(calls[0].url, /interval=1d/);
 });
 
-test("getFuyaoKline 信封 code 非 0 时返回 null", async () => {
+test("getKline 信封 code 非 0 时返回 null", async () => {
   mockFetch(async () => ({ status: 200, body: { code: 2003, message: "forbidden", data: null } }));
-  const bars = await getFuyaoKline("000001.SZ");
+  const bars = await getKline(TEST_CTX, "000001.SZ");
   assert.equal(bars, null);
 });

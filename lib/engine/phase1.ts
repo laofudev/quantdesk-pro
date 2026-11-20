@@ -1,7 +1,8 @@
 /**
  * Phase 1 初筛（全市场 → 股票池）
- * 复刻自 Alpha-X 公开前端逻辑，仅供学习。
  * 纯函数，无网络依赖。
+ *
+ * 扶摇口径说明：换手率由「成交额 / 流通市值」推导，量比由 K 线推导。
  */
 import type { EngineConfig, Quote } from "@/lib/types";
 
@@ -33,7 +34,6 @@ export function isSTName(name?: string): boolean {
 
 /**
  * Phase1 基础分（量比 + 换手 + 涨幅弹性合成）—— 用于截断排序，非最终分
- * 复刻自 Alpha-X 公开前端逻辑，仅供学习。
  */
 export function baseScore(q: Quote): number {
   const lb = Math.min(Math.max(q.volumeRatio, 0), 10);   // 量比截断到 10

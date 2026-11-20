@@ -4,18 +4,23 @@
  */
 import { NextResponse } from "next/server";
 import { loadJournal, settlePending, summarize, type StatsSummary } from "@/lib/journal";
+import { requireFuyaoCtx } from "@/lib/api-guard";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const records = await settlePending();
+    const guard = await requireFuyaoCtx();
+    if (!guard.ok || !guard.ctx) {
+      return guard.response ?? NextResponse.json({ error: "未授权" }, { status: 401 });
+    }
+    const records = await settlePending(guard.ctx);
     const summary: StatsSummary = summarize(records);
     return NextResponse.json({ records, summary });
   } catch (err) {
     return NextResponse.json(
       { records: [], summary: null, error: err instanceof Error ? err.message : String(err) },
-      { status: 500 },
+      { status: 500 }
     );
   }
 }

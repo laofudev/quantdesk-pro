@@ -1,7 +1,7 @@
 /**
  * Lucas 板块共振评分（0-100，基准 50 起）
- * 复刻自 Alpha-X 公开前端逻辑，仅供学习。
  * 纯函数，无网络依赖。
+ * 板块归属使用「一级行业」（由 390 个概念板块归并而来）。
  */
 import type { AgentScore, Announcement, StockContext } from "@/lib/types";
 
